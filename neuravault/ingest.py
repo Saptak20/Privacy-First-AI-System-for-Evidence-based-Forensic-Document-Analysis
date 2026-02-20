@@ -179,3 +179,55 @@ class NeuraVaultIngestor:
         
         logger.info(f"Created {len(doc_objects)} Document object(s) with metadata")
         return doc_objects
+        
+    def split_documents(self, documents: List[Document]) -> List[Document]:
+        """
+        Split documents into chunks using RecursiveCharacterTextSplitter.
+        
+        Args:
+            documents: List of Document objects to split
+            
+        Returns:
+            List of chunked Document objects
+        """
+        splitter = RecursiveCharacterTextSplitter(
+            chunk_size=self.chunk_size,
+            chunk_overlap=self.chunk_overlap,
+            separators=["\n\n", "\n", ". ", " ", ""]
+        )
+        
+        logger.info(
+            f"Splitting documents with chunk_size={self.chunk_size}, "
+            f"overlap={self.chunk_overlap}"
+        )
+        
+        split_docs = splitter.split_documents(documents)
+        logger.info(f"Created {len(split_docs)} text chunk(s) from documents")
+        
+        return split_docs
+    
+    def create_vector_store(self, documents: List[Document]) -> Chroma:
+        """
+        Initialize ChromaDB vector store with embeddings.
+        
+        Args:
+            documents: List of Document chunks to embed and store
+            
+        Returns:
+            Initialized Chroma vector store instance
+        """
+        logger.info(f"Initializing embeddings model: {self.model_name}")
+        
+        embeddings = HuggingFaceEmbeddings(model_name=self.model_name)
+        
+        logger.info(f"Creating vector store with {len(documents)} chunk(s)...")
+        
+        vector_store = Chroma.from_documents(
+            documents=documents,
+            embedding=embeddings,
+            persist_directory=str(self.vector_db_dir),
+            collection_name="neuravault_collection"
+        )
+        
+        logger.info(f"Vector store created and persisted to {self.vector_db_dir}")
+        return vector_store
