@@ -34,7 +34,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Creating class NeuraVaultIngestor
 class NeuraVaultIngestor:
     """
     Manages the ingestion of documents into the NeuraVault vector store.
@@ -122,3 +121,61 @@ class NeuraVaultIngestor:
         
         logger.info(f"Successfully loaded {len(documents)} document(s)")
         return documents
+    
+    def clean_text(self, text: str) -> str:
+        """
+        Clean extracted text to remove noise and redundancy.
+        
+        Args:
+            text: Raw extracted text from PDF
+            
+        Returns:
+            Cleaned text with reduced noise
+        """
+        # Remove multiple consecutive whitespaces
+        import re
+        text = re.sub(r'\s+', ' ', text)
+        
+        # Remove common headers/footers patterns
+        text = re.sub(r'Page \d+', '', text)
+        text = re.sub(r'^\d+\s*$', '', text, flags=re.MULTILINE)
+        
+        # Remove excessive special characters while preserving readability
+        text = re.sub(r'[^\w\s\.\,\!\?\-\:\;\(\)\/\&]', '', text)
+        
+        # Strip leading/trailing whitespace
+        text = text.strip()
+        
+        return text
+    
+    def create_documents_with_metadata(
+        self, 
+        documents: List[Tuple[str, str]]
+    ) -> List[Document]:
+        """
+        Create LangChain Document objects with metadata.
+        
+        Args:
+            documents: List of (filename, text) tuples
+            
+        Returns:
+            List of LangChain Document objects with metadata
+        """
+        doc_objects = []
+        
+        for filename, text in documents:
+            # Clean the text
+            cleaned_text = self.clean_text(text)
+            
+            # Create document with metadata
+            doc = Document(
+                page_content=cleaned_text,
+                metadata={
+                    "source": filename,
+                    "document_type": "pdf"
+                }
+            )
+            doc_objects.append(doc)
+        
+        logger.info(f"Created {len(doc_objects)} Document object(s) with metadata")
+        return doc_objects
