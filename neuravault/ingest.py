@@ -231,3 +231,63 @@ class NeuraVaultIngestor:
         
         logger.info(f"Vector store created and persisted to {self.vector_db_dir}")
         return vector_store
+        
+    def ingest(self) -> Chroma:
+        """
+        Main pipeline orchestration for document ingestion.
+        
+        Returns:
+            Initialized Chroma vector store
+            
+        Raises:
+            FileNotFoundError: If no PDF documents are found
+            Exception: If any step in the pipeline fails
+        """
+        try:
+            logger.info("=" * 60)
+            logger.info("Starting NeuraVault Document Ingestion Pipeline")
+            logger.info("=" * 60)
+            
+            # Step 1: Load PDF documents
+            raw_documents = self.load_pdf_documents()
+            
+            # Step 2: Create Document objects with metadata
+            doc_objects = self.create_documents_with_metadata(raw_documents)
+            
+            # Step 3: Split documents into chunks
+            split_docs = self.split_documents(doc_objects)
+            
+            # Step 4: Create and persist vector store
+            vector_store = self.create_vector_store(split_docs)
+            
+            logger.info("=" * 60)
+            logger.info("Ingestion pipeline completed successfully!")
+            logger.info("=" * 60)
+            
+            return vector_store
+            
+        except Exception as e:
+            logger.error(f"Ingestion pipeline failed: {str(e)}", exc_info=True)
+            raise
+
+
+def main():
+    """
+    Main entry point for running the ingestion pipeline.
+    
+    Usage:
+        python ingest.py
+    """
+    try:
+        ingestor = NeuraVaultIngestor()
+        ingestor.ingest()
+        logger.info("Ingestion complete. Ready to query with rag_engine.py")
+        
+    except FileNotFoundError as e:
+        logger.error(f"Setup Error: {str(e)}")
+    except Exception as e:
+        logger.error(f"Fatal Error: {str(e)}", exc_info=True)
+
+
+if __name__ == "__main__":
+    main()
