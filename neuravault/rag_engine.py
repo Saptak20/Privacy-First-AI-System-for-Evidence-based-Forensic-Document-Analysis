@@ -233,3 +233,70 @@ Make sure to cite which document the information comes from."""
         except Exception as e:
             logger.error(f"Failed to create retrieval chain: {str(e)}", exc_info=True)
             raise
+            
+    def query(self, question: str) -> Dict[str, Any]:
+        """
+        Process a user query and return answer with sources.
+        
+        Args:
+            question: User's query string
+            
+        Returns:
+            Dictionary containing:
+                - 'answer': Generated answer from LLM
+                - 'sources': List of source documents with metadata
+                - 'source_texts': List of relevant text chunks used
+        """
+        if not self.qa_chain:
+            logger.error("QA chain not initialized. Call create_retrieval_chain() first.")
+            raise ValueError("QA chain must be created before querying")
+        
+        try:
+            logger.info(f"Processing query: {question[:100]}...")
+            
+            # Invoke the QA chain with new format
+            result = self.qa_chain.invoke(question)
+
+            # Extract answer and sources from new format
+            answer = result.get("answer", "")
+            source_documents = result.get("source_documents", [])
+            
+            # Format sources
+            sources = self._format_sources(source_documents)
+            source_texts = [doc.page_content for doc in source_documents]
+            
+            # Store for access in UI
+            self.retrieved_sources = sources
+            
+            logger.info(f"Query processed. Retrieved {len(sources)} source(s)")
+            
+            return {
+                "answer": answer,
+                "sources": sources,
+                "source_texts": source_texts
+            }
+            
+        except Exception as e:
+            logger.error(f"Query processing failed: {str(e)}", exc_info=True)
+            raise
+    
+    def _format_sources(self, documents: List[Document]) -> List[Dict[str, Any]]:
+        """
+        Format source documents for display.
+        
+        Args:
+            documents: List of source Document objects
+            
+        Returns:
+            Formatted list of source information
+        """
+        sources = []
+        for doc in documents:
+            source_info = {
+                "filename": doc.metadata.get("source", "Unknown"),
+                "document_type": doc.metadata.get("document_type", "pdf"),
+                "excerpt": doc.page_content[:200] + "..." if len(doc.page_content) > 200 else doc.page_content
+            }
+            sources.append(source_info)
+        return sources
+    
