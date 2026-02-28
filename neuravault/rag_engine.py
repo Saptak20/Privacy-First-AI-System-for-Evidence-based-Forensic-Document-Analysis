@@ -299,4 +299,102 @@ Make sure to cite which document the information comes from."""
             }
             sources.append(source_info)
         return sources
+
+def initialize_rag_engine(
+    vector_db_dir: str = "vector_db",
+    model_name: str = "llama3.2"
+) -> NeuraVaultRAGEngine:
+    """
+    Factory function to initialize a fully configured RAG engine.
     
+    Args:
+        vector_db_dir: Path to vector database
+        model_name: Ollama model identifier
+        
+    Returns:
+        Fully initialized NeuraVaultRAGEngine ready for querying
+        
+    Raises:
+        Exception: If any initialization step fails
+    """
+    try:
+        logger.info("=" * 60)
+        logger.info("Initializing NeuraVault RAG Engine")
+        logger.info("=" * 60)
+        
+        engine = NeuraVaultRAGEngine(
+            vector_db_dir=vector_db_dir,
+            model_name=model_name
+        )
+        
+        # Load vector store
+        engine.load_vector_store()
+        
+        # Initialize LLM
+        engine.initialize_llm()
+        
+        # Create retrieval chain
+        engine.create_retrieval_chain()
+        
+        logger.info("=" * 60)
+        logger.info("RAG Engine initialized successfully!")
+        logger.info("=" * 60)
+        
+        return engine
+        
+    except Exception as e:
+        logger.error(f"RAG Engine initialization failed: {str(e)}", exc_info=True)
+        raise
+
+
+def main():
+    """
+    Main entry point for testing the RAG engine.
+    
+    Usage:
+        python neuravault/rag_engine.py
+    """
+    try:
+        # Initialize engine
+        engine = initialize_rag_engine()
+        
+        # Interactive query loop
+        print("\n" + "=" * 60)
+        print("NeuraVault RAG Engine - Interactive Query")
+        print("=" * 60)
+        print("Type 'exit' to quit\n")
+        
+        while True:
+            question = input("\nAsk a question: ").strip()
+            
+            if question.lower() == "exit":
+                print("Goodbye!")
+                break
+            
+            if not question:
+                print("Please enter a question.")
+                continue
+            
+            # Process query
+            result = engine.query(question)
+            
+            # Display results
+            print("\n" + "=" * 60)
+            print("ANSWER:")
+            print("="*60)
+            print(result["answer"])
+            
+            print("\n" + "="*60)
+            print("SOURCES:")
+            print("=" * 60)
+            for i, source in enumerate(result["sources"], 1):
+                print(f"\n[Source {i}] {source['filename']}")
+                print(f"Type: {source['document_type']}")
+                print(f"Excerpt: {source['excerpt']}")
+    
+    except Exception as e:
+        logger.error(f"Fatal Error: {str(e)}", exc_info=True)
+
+
+if __name__ == "__main__":
+    main()
