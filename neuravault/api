@@ -4,26 +4,55 @@ api.py - FastAPI Backend for NeuraVault
 This module creates the REST API backend for the NeuraVault RAG application.
 Replaces the Chainlit UI with API endpoints consumed by a Next.js frontend.
 
+Security Best Practices implemented:
+    ✔ Rate Limiting          - slowapi per-IP throttling
+    ✔ Authentication         - JWT bearer tokens (register / login / refresh)
+    ✔ Authorization          - role-based access control (admin / user)
+    ✔ Input Validation       - strict Pydantic models with sanitisation
+    ✔ CORS Configuration     - explicit origin allowlist, no wildcard
+    ✔ Security Headers       - OWASP headers via middleware
+    ✔ SQL Injection Prev.    - parameterized queries in database.py
+    ✔ XSS Prevention         - input/output sanitisation + CSP header
+    ✔ CSRF Protection        - double-submit cookie middleware
+    ✔ Password Hashing       - bcrypt via passlib
+
 Endpoints:
-    - POST /api/query       — Process a question through the RAG engine
-    - POST /api/upload      — Upload PDF files for ingestion
-    - POST /api/ingest      — Trigger vector-DB ingestion from data/ folder
-    - GET  /api/health      — Health / readiness check
-    - GET  /api/starters    — Starter question suggestions
+    Auth:
+        POST /api/auth/register   — Create a new user account
+        POST /api/auth/login      — Authenticate & receive tokens
+        POST /api/auth/refresh    — Refresh an access token
+        GET  /api/auth/me         — Current user profile
+
+    Protected (require Bearer token):
+        POST /api/query           — Process a question through the RAG engine
+        POST /api/upload          — Upload PDF files for ingestion
+        POST /api/ingest          — Trigger vector-DB ingestion
+        GET  /api/documents       — List uploaded documents
+
+    Public:
+        GET  /api/health          — Health / readiness check
+        GET  /api/starters        — Starter question suggestions
+        GET  /api/csrf-token      — Obtain a fresh CSRF token
 
 Run with: uvicorn neuravault.api:app --reload
 """
 
 import os
+import re
 import sys
 import shutil
 import logging
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, Depends, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+
+from slowapi import Limiter
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address as _slowapi_remote
+from starlette.responses import JSONResponse
 
 # Ensure project root is on sys.path
 ROOT_DIR = Path(__file__).resolve().parents[1]
@@ -32,6 +61,35 @@ if str(ROOT_DIR) not in sys.path:
 
 from neuravault.rag_engine import initialize_rag_engine, NeuraVaultRAGEngine
 from neuravault.ingest import NeuraVaultIngestor
+from neuravault.database import init_db, create_user, get_user_by_username, get_user_by_email
+from neuravault.security import (
+    # Auth / JWT
+    hash_password,
+    verify_password,
+    create_access_token,
+    create_refresh_token,
+    decode_token,
+    get_current_user,
+    # Authorization
+    require_admin,
+    require_user,
+    # Input models
+    RegisterRequest,
+    LoginRequest,
+    SecureQueryRequest,
+    # Sanitisation
+    sanitize_input,
+    sanitize_output,
+    # Middlewares
+    SecurityHeadersMiddleware,
+    CSRFMiddleware,
+    # Rate-limit helper
+    get_remote_address,
+    # CORS
+    ALLOWED_ORIGINS,
+    # CSRF
+    CSRF_COOKIE_NAME,
+)
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -49,22 +107,53 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
+# 1. Rate Limiting (slowapi)
+# ---------------------------------------------------------------------------
+limiter = Limiter(key_func=get_remote_address)
+
+# ---------------------------------------------------------------------------
 # FastAPI application
 # ---------------------------------------------------------------------------
 app = FastAPI(
     title="NeuraVault API",
     description="Privacy-first RAG backend for forensic document analysis",
-    version="2.0.0",
+    version="3.0.0",
 )
 
-# CORS – allow the Next.js dev server (and production origin)
+# Attach limiter state
+app.state.limiter = limiter
+
+
+@app.exception_handler(RateLimitExceeded)
+async def _rate_limit_handler(request: Request, exc: RateLimitExceeded):
+    return JSONResponse(
+        status_code=429,
+        content={"detail": "Rate limit exceeded. Please slow down."},
+    )
+
+
+# ---------------------------------------------------------------------------
+# 5. CORS Configuration – explicit origin allowlist, no wildcards
+# ---------------------------------------------------------------------------
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=[
+        "Content-Type",
+        "Authorization",
+        "X-CSRF-Token",
+        "Accept",
+    ],
+    expose_headers=["X-CSRF-Token"],
 )
+
+# 6. Security Headers middleware
+app.add_middleware(SecurityHeadersMiddleware)
+
+# 9. CSRF Protection middleware
+app.add_middleware(CSRFMiddleware)
 
 # ---------------------------------------------------------------------------
 # Global state
@@ -73,12 +162,8 @@ rag_engine: Optional[NeuraVaultRAGEngine] = None
 
 
 # ---------------------------------------------------------------------------
-# Pydantic models
+# Pydantic models (responses)
 # ---------------------------------------------------------------------------
-class QueryRequest(BaseModel):
-    question: str
-
-
 class SourceInfo(BaseModel):
     filename: str
     document_type: str
@@ -108,13 +193,34 @@ class IngestResponse(BaseModel):
     chunks_created: int
 
 
+class TokenResponse(BaseModel):
+    access_token: str
+    refresh_token: str
+    token_type: str = "bearer"
+    username: str
+    role: str
+
+
+class UserProfile(BaseModel):
+    id: int
+    username: str
+    email: str
+    role: str
+    is_active: bool
+
+
 # ---------------------------------------------------------------------------
 # Lifecycle events
 # ---------------------------------------------------------------------------
 @app.on_event("startup")
 async def startup_event():
-    """Attempt to initialise the RAG engine at startup."""
+    """Initialise the database and attempt to load the RAG engine."""
     global rag_engine
+
+    # Initialise user database (SQL-injection-safe parameterized queries)
+    init_db()
+    logger.info("User database ready")
+
     try:
         rag_engine = initialize_rag_engine(
             vector_db_dir="vector_db",
@@ -129,11 +235,113 @@ async def startup_event():
         logger.warning(f"RAG engine not ready at startup: {e}")
 
 
-# ---------------------------------------------------------------------------
-# Endpoints
-# ---------------------------------------------------------------------------
+# ╔═════════════════════════════════════════════════════════════════════════╗
+# ║  AUTH ENDPOINTS                                                       ║
+# ╚═════════════════════════════════════════════════════════════════════════╝
+
+@app.post("/api/auth/register", response_model=TokenResponse)
+@limiter.limit("5/minute")
+async def register(request: Request, body: RegisterRequest):
+    """Register a new user with validated & hashed password."""
+    # Check duplicates (parameterized queries – SQL injection safe)
+    if get_user_by_username(body.username):
+        raise HTTPException(status_code=409, detail="Username already taken.")
+    if get_user_by_email(body.email):
+        raise HTTPException(status_code=409, detail="Email already registered.")
+
+    hashed = hash_password(body.password)
+    user = create_user(
+        username=body.username,
+        email=body.email,
+        hashed_password=hashed,
+        role="user",
+    )
+    logger.info(f"New user registered: {body.username}")
+
+    access = create_access_token({"sub": user["username"], "role": user["role"]})
+    refresh = create_refresh_token({"sub": user["username"], "role": user["role"]})
+
+    return TokenResponse(
+        access_token=access,
+        refresh_token=refresh,
+        username=user["username"],
+        role=user["role"],
+    )
+
+
+@app.post("/api/auth/login", response_model=TokenResponse)
+@limiter.limit("10/minute")
+async def login(request: Request, body: LoginRequest):
+    """Authenticate a user and return JWT tokens."""
+    user = get_user_by_username(body.username)
+    if not user or not verify_password(body.password, user["hashed_pw"]):
+        logger.warning(f"Failed login attempt for: {body.username}")
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid username or password.",
+        )
+    if not user.get("is_active"):
+        raise HTTPException(status_code=403, detail="Account is deactivated.")
+
+    access = create_access_token({"sub": user["username"], "role": user["role"]})
+    refresh = create_refresh_token({"sub": user["username"], "role": user["role"]})
+    logger.info(f"User logged in: {user['username']}")
+
+    return TokenResponse(
+        access_token=access,
+        refresh_token=refresh,
+        username=user["username"],
+        role=user["role"],
+    )
+
+
+class RefreshRequest(BaseModel):
+    refresh_token: str
+
+
+@app.post("/api/auth/refresh", response_model=TokenResponse)
+@limiter.limit("10/minute")
+async def refresh_token(request: Request, body: RefreshRequest):
+    """Issue a new access token using a valid refresh token."""
+    payload = decode_token(body.refresh_token)
+    if payload.get("type") != "refresh":
+        raise HTTPException(status_code=401, detail="Invalid token type.")
+
+    username = payload.get("sub")
+    user = get_user_by_username(username) if username else None
+    if not user or not user.get("is_active"):
+        raise HTTPException(status_code=401, detail="User not found or inactive.")
+
+    access = create_access_token({"sub": user["username"], "role": user["role"]})
+    refresh = create_refresh_token({"sub": user["username"], "role": user["role"]})
+
+    return TokenResponse(
+        access_token=access,
+        refresh_token=refresh,
+        username=user["username"],
+        role=user["role"],
+    )
+
+
+@app.get("/api/auth/me", response_model=UserProfile)
+async def me(user: dict = Depends(get_current_user)):
+    """Return the authenticated user's profile."""
+    return UserProfile(
+        id=user["id"],
+        username=user["username"],
+        email=user["email"],
+        role=user["role"],
+        is_active=bool(user["is_active"]),
+    )
+
+
+# ╔═════════════════════════════════════════════════════════════════════════╗
+# ║  PUBLIC ENDPOINTS                                                     ║
+# ╚═════════════════════════════════════════════════════════════════════════╝
+
 @app.get("/api/health", response_model=HealthResponse)
-async def health_check():
+@limiter.limit("30/minute")
+async def health_check(request: Request):
     """Return service health information."""
     return HealthResponse(
         status="ok",
@@ -144,7 +352,8 @@ async def health_check():
 
 
 @app.get("/api/starters", response_model=List[StarterQuestion])
-async def get_starters():
+@limiter.limit("30/minute")
+async def get_starters(request: Request):
     """Return suggested starter questions."""
     return [
         StarterQuestion(
@@ -166,9 +375,36 @@ async def get_starters():
     ]
 
 
+@app.get("/api/csrf-token")
+@limiter.limit("30/minute")
+async def get_csrf_token(request: Request, response: Response):
+    """Return a fresh CSRF token (also set in cookie by middleware)."""
+    import secrets as _s
+
+    token = _s.token_urlsafe(32)
+    response.set_cookie(
+        key=CSRF_COOKIE_NAME,
+        value=token,
+        httponly=False,
+        samesite="strict",
+        secure=False,
+        max_age=3600,
+    )
+    return {"csrf_token": token}
+
+
+# ╔═════════════════════════════════════════════════════════════════════════╗
+# ║  PROTECTED ENDPOINTS (require authentication)                         ║
+# ╚═════════════════════════════════════════════════════════════════════════╝
+
 @app.post("/api/query", response_model=QueryResponse)
-async def query(body: QueryRequest):
-    """Process a question through the RAG engine and return an answer with sources."""
+@limiter.limit("20/minute")
+async def query(
+    request: Request,
+    body: SecureQueryRequest,
+    user: dict = Depends(require_user),
+):
+    """Process a question through the RAG engine (authenticated + validated)."""
     global rag_engine
 
     if rag_engine is None:
@@ -177,53 +413,85 @@ async def query(body: QueryRequest):
             detail="RAG engine not initialised. Ingest documents first via /api/ingest.",
         )
 
-    if not body.question.strip():
-        raise HTTPException(status_code=400, detail="Question cannot be empty.")
-
     try:
-        logger.info(f"Query received: {body.question[:120]}...")
+        logger.info(f"[{user['username']}] Query: {body.question[:120]}...")
         result = rag_engine.query(body.question)
 
+        # Sanitise output (XSS prevention)
         sources = [
             SourceInfo(
-                filename=s.get("filename", "Unknown"),
-                document_type=s.get("document_type", "pdf"),
-                excerpt=s.get("excerpt", ""),
+                filename=sanitize_output(s.get("filename", "Unknown")),
+                document_type=sanitize_output(s.get("document_type", "pdf")),
+                excerpt=sanitize_output(s.get("excerpt", "")),
             )
             for s in result.get("sources", [])
         ]
 
-        return QueryResponse(answer=result.get("answer", ""), sources=sources)
+        return QueryResponse(
+            answer=result.get("answer", ""),
+            sources=sources,
+        )
 
     except Exception as e:
         logger.error(f"Query failed: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="An internal error occurred.")
 
 
 @app.post("/api/upload")
-async def upload_files(files: List[UploadFile] = File(...)):
-    """Upload one or more PDF files into the data/ directory."""
+@limiter.limit("10/minute")
+async def upload_files(
+    request: Request,
+    files: List[UploadFile] = File(...),
+    user: dict = Depends(require_user),
+):
+    """Upload one or more PDF files into the data/ directory (authenticated)."""
     data_dir = Path("data")
     data_dir.mkdir(parents=True, exist_ok=True)
 
+    # Input validation: filename sanitisation
+    SAFE_FILENAME = re.compile(r"^[\w\-. ]+\.pdf$", re.IGNORECASE)
+    MAX_FILE_SIZE = 50 * 1024 * 1024  # 50 MB
+
     saved: List[str] = []
     for f in files:
-        if not f.filename.lower().endswith(".pdf"):
+        # Validate filename (XSS / path traversal prevention)
+        if not f.filename or not SAFE_FILENAME.match(f.filename):
             raise HTTPException(
-                status_code=400, detail=f"Only PDF files are supported. Got: {f.filename}"
+                status_code=400,
+                detail=f"Invalid filename: {f.filename}. Only alphanumeric PDF names allowed.",
             )
+
+        # Read and check size
+        content = await f.read()
+        if len(content) > MAX_FILE_SIZE:
+            raise HTTPException(
+                status_code=413,
+                detail=f"File too large: {f.filename} ({len(content)} bytes > {MAX_FILE_SIZE}).",
+            )
+
+        # Validate PDF magic bytes
+        if not content[:5].startswith(b"%PDF-"):
+            raise HTTPException(
+                status_code=400,
+                detail=f"File does not appear to be a valid PDF: {f.filename}",
+            )
+
         dest = data_dir / f.filename
         with open(dest, "wb") as buf:
-            shutil.copyfileobj(f.file, buf)
+            buf.write(content)
         saved.append(f.filename)
-        logger.info(f"Saved uploaded file: {f.filename}")
+        logger.info(f"[{user['username']}] Uploaded: {f.filename}")
 
     return {"status": "ok", "files": saved}
 
 
 @app.get("/api/documents")
-async def list_documents():
-    """List PDF files currently in the data/ folder."""
+@limiter.limit("30/minute")
+async def list_documents(
+    request: Request,
+    user: dict = Depends(require_user),
+):
+    """List PDF files currently in the data/ folder (authenticated)."""
     data_dir = Path("data")
     if not data_dir.exists():
         return {"files": []}
@@ -236,8 +504,12 @@ async def list_documents():
 
 
 @app.post("/api/ingest", response_model=IngestResponse)
-async def ingest_documents():
-    """Run the ingestion pipeline on PDFs in the data/ folder and (re)load the engine."""
+@limiter.limit("5/minute")
+async def ingest_documents(
+    request: Request,
+    user: dict = Depends(require_admin),
+):
+    """Run ingestion pipeline (admin-only, authenticated)."""
     global rag_engine
 
     try:
@@ -248,14 +520,14 @@ async def ingest_documents():
         split_docs = ingestor.split_documents(doc_objects)
         ingestor.create_vector_store(split_docs)
 
-        # Re-initialise the RAG engine with the fresh vector DB
         rag_engine = initialize_rag_engine(
             vector_db_dir="vector_db",
             model_name="llama3.2",
         )
 
         logger.info(
-            f"Ingestion complete: {len(raw_docs)} doc(s), {len(split_docs)} chunk(s)"
+            f"[{user['username']}] Ingestion complete: "
+            f"{len(raw_docs)} doc(s), {len(split_docs)} chunk(s)"
         )
 
         return IngestResponse(
@@ -268,4 +540,4 @@ async def ingest_documents():
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
         logger.error(f"Ingestion failed: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Ingestion failed.")
