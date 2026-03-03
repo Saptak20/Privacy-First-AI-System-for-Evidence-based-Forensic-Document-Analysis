@@ -1,0 +1,35 @@
+# Core LLM & Embeddings
+langchain==0.1.20
+langchain-core==0.1.52
+langchain-community==0.0.38
+langchain-text-splitters==0.0.1
+ollama==0.1.31
+
+# Vector Database
+chromadb
+
+# Embeddings Model
+sentence-transformers
+
+# PDF Processing
+pypdf
+
+# Backend API
+fastapi
+uvicorn[standard]
+python-multipart
+
+# Supporting Libraries
+python-dotenv
+pydantic
+numpy
+
+# Logging & Utilities
+pydantic-settings
+
+# ── Security ──────────────────────────────
+python-jose[cryptography]   # JWT tokens (Authentication)
+passlib[bcrypt]             # Password hashing (bcrypt)
+bcrypt==4.0.1               # Pin bcrypt for passlib compat
+slowapi                     # Rate limiting
+pydantic[email]             # Email validation (EmailStr)
