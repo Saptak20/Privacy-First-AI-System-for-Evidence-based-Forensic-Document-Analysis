@@ -428,4 +428,3 @@ This project is provided as-is for educational and research purposes.
 | Backend API | FastAPI | Latest |
 | Frontend | Next.js | 14 |
 | PDF Processing | PyPDF | 4.0.0 |
-
