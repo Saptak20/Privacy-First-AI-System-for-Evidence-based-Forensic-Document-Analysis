@@ -189,6 +189,7 @@ Relevant Excerpt: Forensic analysis is the process of
 examining evidence...
 ```
 
+
 ### Example 2: Specific Information
 
 **Question**: "What procedures should be followed for evidence collection?"
