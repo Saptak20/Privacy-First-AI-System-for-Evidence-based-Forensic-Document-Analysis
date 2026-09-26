@@ -412,9 +412,6 @@ Contributions welcome! Areas for enhancement:
 - Performance optimizations
 - Additional embedding models
 
-## License
-
-This project is provided as-is for educational and research purposes.
 
 ## Technical Specifications
 
